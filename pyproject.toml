@@ -10,6 +10,7 @@ dependencies = [
     "sagemaker-inference>=1.10.1",
     "sagemaker>=2.223.0",
     "torch>=2.3.1",
+    "numpy>=2.0.0",
 ]
 readme = "README.md"
 requires-python = ">= 3.8"
