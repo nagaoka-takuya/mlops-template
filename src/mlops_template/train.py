@@ -5,6 +5,35 @@ from torchvision import datasets, models, transforms
 from torch.utils.data import DataLoader, Dataset
 import os
 import copy
+import logging
+import boto3
+from datetime import datetime
+
+# ロガーの設定
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
+
+# CloudWatchクライアントの作成
+os.environ['AWS_DEFAULT_REGION'] = 'ap-northeast-1'
+region = os.environ['AWS_DEFAULT_REGION']
+cloudwatch = boto3.client('cloudwatch', region_name=region)
+
+# メトリクスを送信するための関数
+def send_metrics_to_cloudwatch(namespace, metric_name, value, unit='None'):
+    # torch.tensor -> float
+    value = value.item() if isinstance(value, torch.Tensor) else value
+    
+    cloudwatch.put_metric_data(
+        Namespace=namespace,
+        MetricData=[
+            {
+                'MetricName': metric_name,
+                'Value': value,
+                'Unit': unit
+            },
+        ]
+    )
 
 data_dir = '/opt/ml/input/data'  # データフォルダのパス
 train_dir = os.path.join(data_dir, 'train')
@@ -117,8 +146,15 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=25):
 
     print('Best val Acc: {:4f}'.format(best_acc))
 
+    # CloudWatchにメトリクスを送信
+    namespace = f'TrainingJob_{datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")}'
+    send_metrics_to_cloudwatch(namespace, f'{phase}Performance', best_acc, 'Percent')
+
     # ベストモデルの重みをロード
     model.load_state_dict(best_model_wts)
+    # checkpoint ファイルを s3 に保存
+    torch.save(model.state_dict(), '/opt/ml/model/model.pth')
+
     return model
 
 model = train_model(model, criterion, optimizer, exp_lr_scheduler, num_epochs=3)

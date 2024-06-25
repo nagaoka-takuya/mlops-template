@@ -7,13 +7,7 @@ from sagemaker.estimator import Estimator
 from sagemaker.predictor import Predictor
 import time
 from sagemaker.workflow.pipeline_context import PipelineSession
-from sagemaker.workflow.pipeline import Pipeline
 from sagemaker.model_metrics import MetricsSource, ModelMetrics
-from sagemaker.inputs import TrainingInput
-from sagemaker.workflow.steps import TrainingStep, CreateModelStep
-from sagemaker.workflow.model_step import ModelStep
-from sagemaker.workflow.lambda_step import LambdaStep
-from sagemaker.lambda_helper import Lambda
 
 os.environ['AWS_DEFAULT_REGION'] = 'ap-northeast-1'
 region = os.environ['AWS_DEFAULT_REGION']
@@ -29,7 +23,20 @@ else:
     sagemaker_session = sagemaker.Session(boto_session=session)
     role = 'arn:aws:iam::590184069860:role/mlops-template'
 
+
 pipeline_session = PipelineSession()
+
+print(role)
+'''
+sagemaker_policies = get_sagemaker_policies_for_iam_role(role)
+
+# 取得したSageMakerポリシーを出力
+for policy in sagemaker_policies:
+    print(f"Policy Name: {policy['PolicyName']}")
+    print(f"Policy Arn: {policy['PolicyArn']}")
+    print(f"Statement: {policy['Statement']}")
+    print("----")
+'''
 
 # PyTorch Estimatorの作成
 estimator = Estimator(entry_point='train.py',  # 上記のPyTorch学習コードをtrain.pyとして保存
@@ -39,60 +46,39 @@ estimator = Estimator(entry_point='train.py',  # 上記のPyTorch学習コード
                     instance_type='ml.g4dn.xlarge',
                     #instance_type = "local",
                     output_path=f's3://mlops-flower-photos/output/',
-                    sagemaker_session=pipeline_session,)
+                    sagemaker_session=sagemaker_session,)
 
 # トレーニングジョブの開始
 s3_dir = 's3://mlops-flower-photos/input/ver3/'
+estimator.fit({'train': os.path.join(s3_dir, 'train'),
+               'val': os.path.join(s3_dir, 'val'),
+               'test': os.path.join(s3_dir, 'test')})
 
-
-training_step = TrainingStep(
-    name="ImageClassificationTraining",
-    estimator=estimator,
-    inputs={
-        "train": TrainingInput(
-            s3_data= os.path.join(s3_dir, 'train'),
-            content_type='x-image'
-        )
-        ,
-        "val": TrainingInput(
-            s3_data= os.path.join(s3_dir, 'val'),
-            content_type='x-image'
-        ),
-        "test": TrainingInput(
-            s3_data= os.path.join(s3_dir, 'test'),
-            content_type='x-image'
-        )
-    }
-)
 
 endpoint_image_uri = '763104351884.dkr.ecr.ap-northeast-1.amazonaws.com/pytorch-inference:2.3.0-gpu-py311-cu121-ubuntu20.04-sagemaker'
 
 # モデルの登録
-model = Model(model_data=training_step.properties.ModelArtifacts.S3ModelArtifacts,
+model = Model(model_data=estimator.model_data,
               image_uri=endpoint_image_uri,
               role=role,
-              sagemaker_session=pipeline_session)
+              sagemaker_session=sagemaker_session)
 
-model_step = ModelStep(
-    name="CreateModel",
-    step_args=model.create(instance_type="ml.g4.xlarge",accelerator_type="ml.eia1.medium")
-    )
+model_package_info = {
+ "ModelPackageGroupName" : 'FlowerModelPackageGroup', 
+ "ModelPackageGroupDescription" : 'Flower PyTorch model package'
+}
 
-lambda_function = Lambda(
-    function_arn="arn:aws:lambda:ap-northeast-1:770693421928:layer:Klayers-python39-pytorch:1",
-    session=sagemaker_session
-)
-update_endpoint_step = LambdaStep(
-    name="UpdateEndpoint",
-    lambda_func=lambda_function,
-    inputs={"ModelName": model_step.properties.ModelName, "EndpointName": "sample_endpoint"}
-)
+# モデルパッケージの作成
+sm_client = boto3.client('sagemaker', region_name=region)
+#model_package = sm_client.create_model_package_group(**model_package_info)
 
-pipeline = Pipeline(
-    name="TrainingPipeline",
-    steps=[training_step, model_step],
-)
+# モデルパッケージをモデルレジストリに登録
+#model_package_version = model_package['ModelPackageGroupArn']
 
-# パイプラインの定義を作成または更新
-pipeline.upsert(role_arn=role)
-pipeline.start()
+# model deploy
+predictor = model.deploy(initial_instance_count=1, instance_type='ml.g4dn.xlarge')
+
+
+# トレーニングジョブの評価結果を取得
+job_description = sagemaker_session.describe_training_job(estimator.latest_training_job.name)
+print(job_description)
